@@ -118,7 +118,13 @@ def _to_block_delta_fields(block: CompatBlock) -> BlockDeltaFields:
 
 
 def _to_content_delta(block: CompatBlock) -> ContentBlockDelta:
-    """Convert a content-block slice/snapshot to an explicit protocol delta."""
+    """Convert a content-block slice/snapshot to an explicit protocol delta.
+
+    The returned payload never aliases `block`. For tool-call chunks `block` is
+    the live per-index accumulator that `_finalize_and_build_finish` reads at
+    end of message, and `before_builtins` stream transformers are free to
+    rewrite delta content in flight.
+    """
     btype = block.get("type")
     if btype == "text":
         return cast("TextDelta", {"type": "text-delta", "text": block.get("text", "")})
@@ -139,7 +145,8 @@ def _to_content_delta(block: CompatBlock) -> ContentBlockDelta:
         "BlockDelta",
         {
             "type": "block-delta",
-            "fields": _to_block_delta_fields(block),
+            # Copy: the branches above build fresh dicts, this one must too.
+            "fields": _to_block_delta_fields(dict(block)),
         },
     )
 

@@ -328,6 +328,75 @@ def test_chunks_to_events_tool_call_multichunk() -> None:
     assert "finish_reason" not in _event_metadata(events[-1])
 
 
+def _tool_call_arg_chunks() -> list[ChatGenerationChunk]:
+    """`{"city": "Boston"}` split across chunks, as providers stream it."""
+    slices = ["", '{"city"', ': "Bos', 'ton"}']
+    return [
+        ChatGenerationChunk(
+            message=AIMessageChunk(
+                content="",
+                id="msg-1",
+                tool_call_chunks=[
+                    {
+                        "index": 0,
+                        "id": "tc1" if i == 0 else None,
+                        "name": "get_weather" if i == 0 else None,
+                        "args": args,
+                        "type": "tool_call_chunk",
+                    }
+                ],
+            )
+        )
+        for i, args in enumerate(slices)
+    ]
+
+
+def test_block_delta_fields_do_not_alias_accumulator() -> None:
+    """Mutating an emitted `block-delta` must not corrupt the finalized block.
+
+    `before_builtins` stream transformers are documented as being able to
+    rewrite delta content in flight. If the emitted payload aliases the
+    bridge's per-index accumulator, such a write also rewrites the state that
+    `_finalize_and_build_finish` reads, silently emptying the tool call.
+
+    Events are consumed lazily on purpose: materializing the generator first
+    would finalize every block before the writes land, and the test would pass
+    even when the payload is aliased.
+    """
+    finalized: ToolCall | None = None
+    for event in chunks_to_events(iter(_tool_call_arg_chunks()), message_id="msg-1"):
+        if event["event"] == "content-block-delta":
+            delta = cast("dict[str, Any]", event["delta"])
+            fields = delta.get("fields")
+            if isinstance(fields, dict) and fields.get("type") == "tool_call_chunk":
+                fields["args"] = ""
+        elif event["event"] == "content-block-finish":
+            finalized = cast("ToolCall", event["content"])
+
+    assert finalized is not None
+    assert finalized["type"] == "tool_call"
+    assert finalized["args"] == {"city": "Boston"}
+
+
+async def test_achunks_to_events_block_delta_fields_do_not_alias_accumulator() -> None:
+    """Async counterpart of `test_block_delta_fields_do_not_alias_accumulator`."""
+    finalized: ToolCall | None = None
+    async for event in achunks_to_events(
+        _aiter_chunks(_tool_call_arg_chunks()), message_id="msg-1"
+    ):
+        if event["event"] == "content-block-delta":
+            delta = cast("dict[str, Any]", event["delta"])
+            fields = delta.get("fields")
+            if isinstance(fields, dict) and fields.get("type") == "tool_call_chunk":
+                fields["args"] = ""
+        elif event["event"] == "content-block-finish":
+            finalized = cast("ToolCall", event["content"])
+
+    assert finalized is not None
+    assert finalized["type"] == "tool_call"
+    assert finalized["args"] == {"city": "Boston"}
+
+
 def test_chunks_to_events_interleaved_parallel_tool_calls() -> None:
     """Parallel tool-call chunks can interleave without losing block lifecycles."""
     events = list(
